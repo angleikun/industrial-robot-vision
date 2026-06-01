@@ -21,8 +21,9 @@ CLAUDE.md
 __pycache__/
 .idea/
 
-# 测试运行产物（每次测试可重新生成）
-tests_manual/T?_*
+# 测试运行产物（临时数据，排除）
+tests_manual/T1_*
+tests_manual/T4_*
 
 # 合成标定板图像（可脚本重新生成）
 tests_manual/caltab_images/
