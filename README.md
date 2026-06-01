@@ -25,16 +25,16 @@
 ### 1. 配置环境变量
 
 ```powershell
-setx HALCONROOT "<HALCON��װ·��>"
+setx HALCONROOT "<HALCON_install_path>"
 ```
 
 ### 2. 编译
 
 ```powershell
 cmake -B build -G "Visual Studio 17 2022" -A x64 `
-  -DCMAKE_PREFIX_PATH="<Qt��װ·��>/6.11.0/msvc2022_64" `
-  -DHALCON_ROOT="<HALCON��װ·��>" `
-  -DOpenCV_DIR="<OpenCV��װ·��>/build/x64/vc16/lib"
+  -DCMAKE_PREFIX_PATH="<Qt_install_path>/6.11.0/msvc2022_64" `
+  -DHALCON_ROOT="<HALCON_install_path>" `
+  -DOpenCV_DIR="<OpenCV_install_path>/build/x64/vc16/lib"
 
 cmake --build build --config Release
 ```
