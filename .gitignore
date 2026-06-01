@@ -20,3 +20,12 @@ CLAUDE.md
 
 __pycache__/
 .idea/
+
+# 测试运行产物（每次测试可重新生成）
+tests_manual/T?_*
+
+# 合成标定板图像（可脚本重新生成）
+tests_manual/caltab_images/
+
+# 开发日志
+DEVLOG.md
