@@ -84,6 +84,51 @@ RobotVisionSystem/
 └── docs/             # 文档
 ```
 
+## 系统架构
+
+```mermaid
+graph TD
+    subgraph UI["  UI 层  "]
+        MW[MainWindow]
+        IV[ImageView]
+        DW[Dock Widgets]
+    end
+
+    subgraph Business[" 业务逻辑层  "]
+        CM[CameraManager]
+        VP[VisionProcessor]
+        CAL[CalibrationManager]
+        ME[MeasurementEngine]
+        CT[CoordTransform]
+    end
+
+    subgraph Data[" 通信 / 数据层  "]
+        RC[RobotClient]
+        DM[DatabaseManager]
+        RM[ReportManager]
+    end
+
+    subgraph External[" 外部依赖  "]
+        HALCON[HALCON 24.11]
+        OpenCV[OpenCV 4.8]
+        Robot[机器人控制器]
+        SQLite[(SQLite)]
+    end
+
+    MW --> IV
+    MW --> CM --> OpenCV
+    MW --> VP --> HALCON
+    MW --> CAL --> HALCON
+    MW --> ME --> HALCON
+    MW --> RC -->|TCP 二进制帧| Robot
+    MW --> DM --> SQLite
+    MW --> RM
+    VP -- 信号槽 --> CT
+    CAL -- 标定结果 --> CT
+    RC -- 末端位姿 --> CT
+    CT -- 世界坐标 --> MW
+```
+
 ## 已知限制
 
 - Basler / Hikvision 相机后端需要额外集成 Pylon SDK / MVS SDK

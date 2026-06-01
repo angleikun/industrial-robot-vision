@@ -28,5 +28,3 @@ tests_manual/T4_*
 # 合成标定板图像（可脚本重新生成）
 tests_manual/caltab_images/
 
-# 开发日志
-DEVLOG.md
