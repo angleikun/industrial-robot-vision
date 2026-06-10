@@ -309,6 +309,165 @@ Logger* Logger::instance() {
 
 ---
 
+### B22 — measureAngle 实现无视入参，从单 ROI 抽线导致 HALCON #1405
+
+**现象**：UI 测量角度时按计划点 4 个点（两条线的端点），按"执行测量"——HALCON 抛 `#1405: Invalid line` 异常，弹窗正文为空（Hotfix 1 前），日志"角度测量失败"。
+
+**根因**：`MeasurementEngine::measureAngle` 的接口签名要求 `line1Start/End + line2Start/End` 四个点（`onPointPicked` 已经收齐 4 个点入参），但旧实现忽略入参，直接在传入的 ROI 内调 `EdgesSubPix` + `FitLineContourXld`——单 ROI 内只能抽出一条线，无法拟合"两条线之间的夹角"。结果传给 `AngleLl` 的 line2 是空 tuple，HALCON 抛 #1405。
+
+**修复**：`src/MeasurementEngine.cpp::measureAngle` 改为：
+- 不再吃 ROI，按入参 `line1Start/End` + `line2Start/End` 构造两条 XLD 直线
+- 各自 `EdgesSubPix` 后用 `LengthXld` + `TupleSortIndex` 选最长 contour（防多边缘碎片污染拟合）
+- 两条 contour 分别 `FitLineContourXld` → 拼 `AngleLl` → 弧度转度
+
+**教训**（人类 review AI 代码时的具体动作）：
+
+1. AI 留 stub 的最常见痕迹是 `/* paramName */` 这种注释掉的参数名——review 时第一个动作必须是 `grep "/\*[a-zA-Z_]+\*/"` 找候选
+2. `measure_xxx` 这类多参数函数，函数签名里每个参数都应该在函数体里至少出现一次（哪怕只是 `if (param.size() < 2)` check）。AI 容易"参数声明但不用"，要**逐参数核对**
+3. 单元测试用真实输入参数而非空 mock，能立刻暴露 stub——未来项目应该补单元测试覆盖率门槛
+
+---
+
+### B23 — measureArea 不读 ROI 像素 + 硬编码阈值
+
+**现象**：选"面积"模式拖 ROI 测量，任何 ROI 上结果都接近 0 或一个固定数，与 ROI 内目标的实际亮度面积无关。
+
+**根因**：`MeasurementEngine::measureArea` 完全没把 ROI 当感兴趣域用——直接 `Threshold(fullImg, 128, 255)` 对全图二值化，阈值还硬编码 128，根本不参考 ROI 内的实际灰度分布。
+
+**修复**：`src/MeasurementEngine.cpp::measureArea`：
+- 用入参 `roi` 调 `ReduceDomain` 把算子作用域限定到 ROI
+- `BinaryThreshold` 用 `'max_separability'`（Otsu 自动阈值）替代硬编码 128
+- `AreaCenter` 求 region 面积
+
+**教训**（人类 review AI 代码时的具体动作）：
+
+1. AI 容易把"硬编码魔数 + 整图处理"作为兜底实现 ship——review 必须逐个检查调用图像处理算子的函数：**是否真用了用户传入的 ROI / 是否硬编码了阈值**
+2. 自适应阈值（如 Otsu `'max_separability'`）应该是工业 vision 函数的默认选择，硬编码阈值通常是开发期 placeholder
+3. 实际使用的中间产物（如 Otsu 选出的具体阈值）应该暴露给用户（写进 `label`），便于调试 + 增加结果可信度
+4. AI 实施完一个算法函数后，必须用与训练数据**完全不同的真实输入**测一次——stub 实现往往在"理论上合理"的输入下能跑通
+
+---
+
+### B24 — UI 入口 / dispatcher 对 ANGLE 和 AREA 缺少形状防御
+
+**现象**：用户没拖 ROI 选"面积"点"执行测量"、或没点齐 4 个点切走"角度"模式——路径直接抛 HALCON 异常或弹空白对话框。
+
+**根因**：`MainWindow::onMeasure` dispatcher 对 LENGTH/CIRCLE/DISTANCE 都有"点不够"的早返回，但 ANGLE 路径只校验"≥2 点"，没要求 4 点；AREA 路径根本没校验当前 ROI 是否有效就丢进 `measureArea`。到 `MeasurementEngine` 拿到非法入参才崩。
+
+**修复**：`src/MainWindow.cpp::onMeasure` + `onPointPicked`：
+- ANGLE 路径要求 `m_pointsNeeded = 4`；不足时不进入 `measureAngle`
+- AREA 路径在 dispatcher 入口校验当前 ROI（非空且非零面积），无效时 `appendLog` + 早返回
+- `onRoiSelectedForMeasure` 加 ROI 太小（<5×5）防御
+
+**教训**：**前置校验属于"算法的一部分"，不是 UI 装饰**。AI 倾向把校验当 UI 礼貌（"给个友好提示就行"），实际上"参数形状对了才进算法"是算法稳定性的保障。dispatcher 是天然的入口校验位置——任何要求"特定形状输入"的算法都该在 dispatcher 把入参形状检查清楚。
+
+---
+
+### B25 — Fix 1：测量绘制层 overlay 不渲染 + clearOverlays 一刀切
+
+**现象**：检测和测量结果落进 `m_lineMeasurements` / `m_circleMeasurements` / `m_angleMeasurements` 这些容器，但 ImageView 上**什么也看不见**；切换检测→测量时旧检测 overlay 也擦不掉，靠"全清"一刀切就连标定 corner 也带走。
+
+**根因**：两件事：
+1. `ImageView::drawOverlays` 完全没遍历 `m_lineMeasurements / m_circleMeasurements / m_angleMeasurements`——add API 在写、绘制路径里没读
+2. 只有一个 `clearOverlays()` 把所有容器（detection / measurement / line / circle / angle / calib）一起清空，无法按类型清理
+
+**修复**：
+- `src/ImageView.cpp::drawOverlays` 加 3 个新 section（line / circle / angle）按各自几何画线 + 端点 cross + label
+- `include/ImageView.h` + `src/ImageView.cpp` 拆 `clearDetectionOverlays` / `clearMeasurementOverlays` / `clearCalibrationOverlays` / `clearAllOverlays` 四个 API；旧 `clearOverlays` 留为 `clearAllOverlays` 的兼容别名
+- `MainWindow::onMatchResult` 改用 `clearDetectionOverlays`；`applyMeasurementOverlay` 入口调 `clearMeasurementOverlays` 实现"只显示最新一次"
+
+**教训**：**add API 和 draw 路径是一对**——加了存储就该有渲染，AI 容易"写了 setter 就以为通了"。Review 时凡是新增 `add*Overlay` API 必须同步检查 `paintEvent` / `draw*` 是否有对应分支。clear 函数的颗粒度直接决定 UX 自由度，"一刀切"是必然演化成 bug 的设计。
+
+---
+
+### B26 — Hotfix 1：HALCON 异常路径未填 `r.label`，UI 弹空白 QMessageBox
+
+**现象**：测量黑色 ROI（无有效边缘）时，`QMessageBox` 弹出标题"测量失败"但**正文完全空白**，用户不知道为什么失败。
+
+**根因**：`MeasurementEngine::measureLength / measureCircle / measureDistance` 的 `catch (HException &e)` 块只 `qWarning() << e.ErrorMessage().Text()`，**没设 `r.valid = false` 也没设 `r.label`**。`MeasureResult` 的 `valid` 默认 `false`、`label` 默认空——`valid==false` 走失败分支，但 `label==""` 导致 `QMessageBox::critical(this, "测量失败", r.label)` 正文为空。
+
+**修复**：3 个 catch 块各加 2 行：
+```cpp
+r.valid = false;
+r.label = QString("XX测量失败: ") + e.ErrorMessage().Text();
+```
+
+**教训**：**异常路径的状态一致性必须显式构造，不能依赖默认值**。AI 写 catch 块倾向"记个 log 就 return"——但 result struct 的"失败态"该是什么样**必须明确写**。这次通过追溯 `QMessageBox` 入口看 `r.label` 的赋值路径，发现 3 处同款漏赋——**同一类 catch 块漏同一类字段是结构性疏忽，不是孤立失误**，应当一次扫齐。
+
+---
+
+### B27 — Fix 3：DISTANCE / ANGLE 点击拾取阶段无视觉反馈
+
+**现象**：DISTANCE 模式点了第一个点，画面**什么都没变**；ANGLE 模式连点 4 个点之间用户不知道点了几个、点在哪里——直到收齐输入算完才一次性出 overlay。点击中途是盲操作。
+
+**根因**：`onPointPicked` 把点存进 `m_collectedPoints` 就 return，没有让 ImageView 在画面上回显"用户刚才点的位置"。绘制层只有"测量完成的 overlay"通道，没有"输入收集中的瞬时 marker"通道。
+
+**修复**：
+- `include/ImageView.h` 加 `addClickedPointMarker(pos, color, label)` + `clearClickedPointMarkers()` + 私有 `ClickedPointMarker` 容器
+- `src/ImageView.cpp::drawOverlays` 加 section 3e 画 cross + label（瞬时层）
+- `clearAllOverlays()` 联动清 `m_clickedPoints`
+- `src/MainWindow.cpp::onPointPicked` 用 switch 按 `m_pendingMeasureType` + 点序号派生 marker 颜色（DISTANCE 全青色、ANGLE 1-2 青 / 3-4 品红）和 label（"距离点1/2"、"线1点1/2"、"线2点1/2"），收齐输入或失败时清 marker
+
+**教训**：**本次最重要的 AI 协作教训不在代码，而在 scope**——原计划 Fix 3 是 5 行 statusBar 同步，AI 看了完整的 `09_ux_fix_plan.md` 之后"重新解读"为 70 行 marker 可视化。结果用户接受了，但明确立规：**任何对 Fix 范围的重新解读必须在动代码前先问**。AI 不能因"方向更好"就静默扩大 scope；用户的"上下文 + 时间预算"判断优先。后续所有 Fix 的 scope 讨论文档（如 `12_fix2_scope.md`）都源于这一教训。
+
+---
+
+### B28 — Fix 2：执行测量按钮无 checked 视觉态 + combo 无反馈，状态机泄漏
+
+**现象**：用户选"角度"按"执行测量"——按钮按下立刻弹回，看起来"什么也没发生"；改 combo 选个测量类型，UI 也没任何反馈，用户不知道选了没。即使测量进行中，也没有"现在处于测量态"的全局指示。
+
+**根因**：
+- `m_btnMeasure` 不是 `setCheckable(true)`，clicked 后立刻 release，无法表达"测量进行中"
+- combo `currentIndexChanged` 没连任何 slot
+- 没有 status bar 通道反映测量状态机的当前位置
+
+**修复**：`include/MainWindow.h` + `src/MainWindow.cpp`：
+- `m_btnMeasure` 提升为成员 + `setCheckable(true)`，clicked(bool) lambda 分发 true→onMeasure / false→cancelMeasurement
+- `setupStatusBar` 加 `m_statusMeasure` label（"测量: 空闲" / "测量: 已选 X..." / "测量中: X..."）
+- combo `currentIndexChanged` 连 lambda 更新 statusMeasure 文字（按钮 checked 时抑制以防"测量中切类型"造成显示错乱）
+- 新增 `cancelMeasurement()` helper（清 marker + 清 collectedPoints + 切回 ROI 模式 + log + reset）
+- 新增 `resetMeasurementState()` helper（`setChecked(false)` + 状态文字"空闲"）
+- **关键**：reset 调用点覆盖**全部 10 条测量结束路径**——success / failure / 早返回 / cancel 全闭环，不只是"成功分支"
+
+**教训**：**状态机正确性 = 覆盖所有结束路径**。如果只有"成功分支"调 reset，UI 一次失败就泄漏"按钮 checked + 状态文字'测量中'"——下次用户点按钮以为是 cancel，实际是 onMeasure 再次启动。AI 写状态机倾向关注 happy path，failure path 经常被遗漏；本次把"各结束路径（成功 / 失败 / 早返回 / cancel）"列入 spec 章节标题，实现时按章节精神扩展覆盖到全部 10 条路径，并在交付时**透明汇报"扩展 6 条字面 spec 没列的路径"**——AI 的扩展解读可以做，但必须报。
+
+**补充教训**（关于 AI 协作纪律）：
+
+- 本次 reset 4 处调用点是 AI（Claude Code）在实施 Fix 2 时主动扩展原 spec、额外添加的覆盖路径。原 spec 只列出 3 处主要 reset 点，AI 补充的 4 处全部来自"对状态机正确性的完整化"动机
+- 这是 AI 协作的**正面 case**：AI 在实施时基于代码语境主动识别出 spec 漏洞并补全
+- 但 AI 没有提前告知（违反了"扩展 spec 前 ask"的协作纪律），事后才透明汇报。这次接受是因为方向正确，但**下次类似情况应该 review 前先 ask**
+- **硬约束**：AI 协作的纪律性约定不能因为"扩展方向正确"而放松
+
+---
+
+### B29 — 未初始化 enum/struct 成员（Cppcheck 静态扫描发现）
+
+**现象**：
+v1.2 修复主线完成后做静态扫描（Cppcheck 2.21.0 + grep 模式扫描）。Cppcheck 报告 `MeasurementEngine.cpp:75` 在 DISTANCE 早返回路径构造的 `MeasureResult` 含未初始化 enum 字段 `type`。同类问题在 `ImageView::DetectionItem` 重复 3 次（`angle` / `score` / `valid`）。
+
+**根因**：
+`struct MeasureResult { MeasureType type; ... }` 缺默认初始化器。人工 review 12 次未发现 —— 因为成功路径和异常 catch 路径都显式设了 `r.type`，只有"早返回"路径漏了。运行时表现为偶然正常（栈上垃圾值碰巧落在合法 enum 范围内），但理论上是未定义行为。
+
+**修复**：
+所有相关 struct 成员加默认初始化器（C++11 in-class member initializer）：
+- `MeasureType type = MeasureType::LENGTH;`
+- `double angle = 0.0;`
+- `double score = 0.0;`
+- `bool   valid = false;`
+
+并顺手处理了 `CalibrationManager` 两处空 catch（B26 同类）：析构函数边界保留 `catch(...)` 但补 qWarning + 注释说明"故意吞"；`clearCalibImages()` 改为完整 chained catch（HException / std::exception / ...）。
+
+**教训**：
+- 人工 review 找不出"碰巧能跑"的未定义行为。Cppcheck 等静态分析工具的不可替代价值在于**数据流分析**，能识别"未初始化但被消费"这种模式
+- C++ struct 应该**所有成员都给默认初始化器**，不要假设默认构造会处理 —— 对 POD 类型（enum / 原生数值 / bool）默认构造不会零初始化
+- AI 协作中的 review 报告再多也无法覆盖工具能覆盖的盲点。正确做法：**人工 review + grep 模式 + 静态分析工具 三层叠加**，各自的强项不重合：
+  1. 人工 review 找语义层 bug（逻辑、流程、UX）
+  2. grep 模式找模式化反模式（空 catch、裸指针、缺 emit）
+  3. 静态分析找数据流盲点（未初始化、UB、shadow）
+- 人类 review 此类提交时的具体动作：每个 `struct` 定义都 grep 一遍 `[a-zA-Z_]+;$` 找无初始化的成员声明；任何 enum 字段必须有 `= EnumName::SomeValue` 默认值，因为 enum 不像 int 默认 0
+
+---
+
 ## 流程反思
 
 回头看，**14+ 个 bug 中至少 70% 可以通过"初始 prompt 更严格"避免**：
