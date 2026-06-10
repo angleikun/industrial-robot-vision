@@ -84,6 +84,9 @@ private:
     void checkHalconLicense();
     void applyMatchConfig();   // push UI match params (score, max targets) into VisionProcessor
     void createTemplateWithRoi(const QRectF &roi);   // create+save template from a selected ROI
+    void applyMeasurementOverlay(const MeasureResult &r);   // route MeasureResult into the right ImageView overlay channel
+    void cancelMeasurement();                               // user-triggered cancel: clears markers / collected points and resets state
+    void resetMeasurementState();                           // uncheck m_btnMeasure + reset m_statusMeasure to "空闲"; called on every measurement end path
     void appendLog(const QString &msg);
     void doExport(const QString &format);
 
@@ -102,6 +105,7 @@ private:
     QPushButton   *m_btnStopAcq    = nullptr;
     QPushButton   *m_btnCreateTpl  = nullptr;
     QPushButton   *m_btnLoadTpl    = nullptr;
+    QPushButton   *m_btnMeasure    = nullptr;
     QPushButton   *m_btnConnect    = nullptr;
     QPushButton   *m_btnSendPose   = nullptr;
 
@@ -119,6 +123,7 @@ private:
     QLabel *m_statusLicense    = nullptr;
     QLabel *m_statusFps        = nullptr;
     QLabel *m_statusDetection  = nullptr;   // live detection result — updates per frame without logging
+    QLabel *m_statusMeasure    = nullptr;   // measurement state: "空闲" / "已选 <类型>..." / "测量中: <类型>..."
     int     m_lastValidCount   = -1;        // for match-state transition logging
 
     // Core modules (owned)

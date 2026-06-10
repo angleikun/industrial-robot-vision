@@ -13,6 +13,8 @@ CalibrationManager::CalibrationManager(QObject *parent)
 
 CalibrationManager::~CalibrationManager()
 {
+    // 析构函数边界：必须吞异常（C++ 析构函数抛异常会触发 std::terminate）。
+    // 仅记录日志，不重抛。
     try {
         if (m_calibDataID.Length() > 0) {
             HalconCpp::ClearCalibData(m_calibDataID);
@@ -20,7 +22,14 @@ CalibrationManager::~CalibrationManager()
         if (m_distMapComputed) {
             m_distortionMap.Clear();
         }
-    } catch (...) {}
+    } catch (const HalconCpp::HException &e) {
+        qWarning() << "~CalibrationManager HALCON exception (swallowed):"
+                   << e.ErrorMessage().Text();
+    } catch (const std::exception &e) {
+        qWarning() << "~CalibrationManager std exception (swallowed):" << e.what();
+    } catch (...) {
+        qWarning() << "~CalibrationManager unknown exception (swallowed)";
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────
@@ -251,7 +260,14 @@ void CalibrationManager::clearCalibImages()
         if (m_calibDataID.Length() > 0) {
             HalconCpp::ClearCalibData(m_calibDataID);
         }
-    } catch (...) {}
+    } catch (const HalconCpp::HException &e) {
+        qWarning() << "clearCalibImages HALCON exception:"
+                   << e.ErrorMessage().Text();
+    } catch (const std::exception &e) {
+        qWarning() << "clearCalibImages std exception:" << e.what();
+    } catch (...) {
+        qWarning() << "clearCalibImages unknown exception";
+    }
 }
 
 // ── Eye-in-hand calibration ──────────────────────────────────────

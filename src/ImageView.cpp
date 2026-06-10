@@ -24,7 +24,7 @@ void ImageView::clearImage()
 {
     m_image = QImage();
     m_cachedPixmap = QPixmap();
-    clearOverlays();
+    clearAllOverlays();
     update();
 }
 
@@ -50,18 +50,98 @@ void ImageView::addMeasurementOverlay(double x, double y, const QString &label)
     update();
 }
 
+void ImageView::addLineMeasurementOverlay(const QPointF &p1, const QPointF &p2, const QString &label)
+{
+    LineMeasurementItem item;
+    item.p1    = p1;
+    item.p2    = p2;
+    item.label = label;
+    m_lineMeasurements.append(item);
+    update();
+}
+
+void ImageView::addCircleMeasurementOverlay(const QPointF &center, double radius, const QString &label)
+{
+    CircleMeasurementItem item;
+    item.center = center;
+    item.radius = radius;
+    item.label  = label;
+    m_circleMeasurements.append(item);
+    update();
+}
+
+void ImageView::addAngleOverlay(const QPointF &line1Start, const QPointF &line1End,
+                                const QPointF &line2Start, const QPointF &line2End,
+                                const QString &label)
+{
+    AngleMeasurementItem item;
+    item.l1Start = line1Start;
+    item.l1End   = line1End;
+    item.l2Start = line2Start;
+    item.l2End   = line2End;
+    item.label   = label;
+    m_angleMeasurements.append(item);
+    update();
+}
+
 void ImageView::addCalibOverlay(const QList<QPointF> &corners)
 {
     m_calibCorners = corners;
     update();
 }
 
-void ImageView::clearOverlays()
+void ImageView::addClickedPointMarker(const QPointF &pos, const QColor &color, const QString &label)
+{
+    ClickedPointMarker item;
+    item.pos   = pos;
+    item.color = color;
+    item.label = label;
+    m_clickedPoints.append(item);
+    update();
+}
+
+void ImageView::clearClickedPointMarkers()
+{
+    m_clickedPoints.clear();
+    update();
+}
+
+void ImageView::clearDetectionOverlays()
+{
+    m_detections.clear();
+    update();
+}
+
+void ImageView::clearMeasurementOverlays()
+{
+    m_measurements.clear();
+    m_lineMeasurements.clear();
+    m_circleMeasurements.clear();
+    m_angleMeasurements.clear();
+    update();
+}
+
+void ImageView::clearCalibrationOverlays()
+{
+    m_calibCorners.clear();
+    update();
+}
+
+void ImageView::clearAllOverlays()
 {
     m_detections.clear();
     m_measurements.clear();
+    m_lineMeasurements.clear();
+    m_circleMeasurements.clear();
+    m_angleMeasurements.clear();
     m_calibCorners.clear();
+    m_clickedPoints.clear();
     update();
+}
+
+void ImageView::clearOverlays()
+{
+    clearAllOverlays();
 }
 
 // ── View controls ────────────────────────────────────────────────
@@ -153,27 +233,109 @@ void ImageView::paintEvent(QPaintEvent *event)
 
 void ImageView::drawOverlays(QPainter &painter)
 {
+    // Rendering order (bottom → top):
+    //   1. detection (template match results)
+    //   2. calibration (calib board corners)
+    //   3. measurement (user's current focus — must stay on top of detection/calib)
+    //   4. interactive ROI selection rectangle (active drag — above everything)
+
+    // ── 1. Detection ──
     for (const auto &d : m_detections) {
         QColor color = d.valid ? QColor(0, 255, 0) : QColor(255, 0, 0);
         drawOrientedBox(painter, d.center, d.angle, 80, 60, color);
 
-        // Score label
         QPointF labelPos = imageToView(d.center + QPointF(0, -45));
         painter.setPen(color);
         painter.drawText(labelPos, QString::number(d.score, 'f', 3));
     }
 
-    // Draw ROI selection rectangle
-    if (m_selecting) {
-        painter.setPen(QPen(QColor(0, 160, 255), 1.5, Qt::DashLine));
-        painter.drawRect(QRectF(m_roiStart, m_roiEnd));
-    }
-
-    // Draw calib corners
+    // ── 2. Calibration corners ──
     painter.setPen(QPen(Qt::yellow, 2));
     for (const auto &pt : m_calibCorners) {
         QPointF vp = imageToView(pt);
         painter.drawEllipse(vp, 2, 2);
+    }
+
+    // ── 3. Measurement overlays (cyan) ──
+    const QColor measureColor(0, 200, 255);
+    QFont labelFont = painter.font();
+    labelFont.setBold(true);
+    painter.setFont(labelFont);
+
+    auto markCross = [&](const QPointF &p, double r) {
+        painter.drawLine(p + QPointF(-r, 0), p + QPointF(r, 0));
+        painter.drawLine(p + QPointF(0, -r), p + QPointF(0, r));
+    };
+
+    // 3a. Cross markers (AREA & legacy callers)
+    painter.setPen(QPen(measureColor, 2));
+    for (const auto &m : m_measurements) {
+        QPointF vp = imageToView(m.pos);
+        markCross(vp, 6);
+        if (!m.label.isEmpty()) {
+            painter.drawText(vp + QPointF(8, -8), m.label);
+        }
+    }
+
+    // 3b. Line segments (LENGTH / DISTANCE)
+    painter.setPen(QPen(measureColor, 2));
+    for (const auto &lm : m_lineMeasurements) {
+        QPointF v1 = imageToView(lm.p1);
+        QPointF v2 = imageToView(lm.p2);
+        painter.drawLine(v1, v2);
+        markCross(v1, 4);
+        markCross(v2, 4);
+        if (!lm.label.isEmpty()) {
+            QPointF mid = (v1 + v2) / 2.0;
+            painter.drawText(mid + QPointF(8, -8), lm.label);
+        }
+    }
+
+    // 3c. Circles (CIRCLE)
+    painter.setPen(QPen(measureColor, 2));
+    painter.setBrush(Qt::NoBrush);
+    for (const auto &cm : m_circleMeasurements) {
+        QPointF vc = imageToView(cm.center);
+        double  vr = cm.radius * m_zoom;
+        painter.drawEllipse(vc, vr, vr);
+        markCross(vc, 4);
+        if (!cm.label.isEmpty()) {
+            painter.drawText(vc + QPointF(vr + 4, -8), cm.label);
+        }
+    }
+
+    // 3d. Angle (two line segments)
+    painter.setPen(QPen(measureColor, 2));
+    for (const auto &am : m_angleMeasurements) {
+        QPointF v1a = imageToView(am.l1Start);
+        QPointF v1b = imageToView(am.l1End);
+        QPointF v2a = imageToView(am.l2Start);
+        QPointF v2b = imageToView(am.l2End);
+        painter.drawLine(v1a, v1b);
+        painter.drawLine(v2a, v2b);
+        markCross(v1a, 4); markCross(v1b, 4);
+        markCross(v2a, 4); markCross(v2b, 4);
+        if (!am.label.isEmpty()) {
+            painter.drawText(v1a + QPointF(8, -8), am.label);
+        }
+    }
+
+    // 3e. Clicked-point markers (transient — visible only during input collection;
+    //     MainWindow clears them before the final measurement overlay is drawn).
+    for (const auto &cp : m_clickedPoints) {
+        QPointF vp = imageToView(cp.pos);
+        painter.setPen(QPen(cp.color, 2));
+        markCross(vp, 6);
+        if (!cp.label.isEmpty()) {
+            painter.drawText(vp + QPointF(8, -8), cp.label);
+        }
+    }
+
+    // ── 4. Interactive ROI selection (topmost) ──
+    if (m_selecting) {
+        painter.setPen(QPen(QColor(0, 160, 255), 1.5, Qt::DashLine));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(QRectF(m_roiStart, m_roiEnd));
     }
 }
 

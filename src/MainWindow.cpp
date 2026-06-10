@@ -31,6 +31,8 @@
 #include <QDateTime>
 #include <QDir>
 
+#include <cmath>
+
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
@@ -149,10 +151,11 @@ void MainWindow::setupControlDock()
     auto *measLayout = new QVBoxLayout(measGroup);
     m_measureType = new QComboBox;
     m_measureType->addItems({"长度", "圆直径", "距离", "角度", "面积"});
-    auto *btnMeasure = new QPushButton("执行测量");
+    m_btnMeasure = new QPushButton("执行测量");
+    m_btnMeasure->setCheckable(true);
     measLayout->addWidget(new QLabel("测量类型:"));
     measLayout->addWidget(m_measureType);
-    measLayout->addWidget(btnMeasure);
+    measLayout->addWidget(m_btnMeasure);
     ctrlLayout->addWidget(measGroup);
 
     // Robot group
@@ -173,9 +176,13 @@ void MainWindow::setupControlDock()
     connect(m_btnLoadTpl,   &QPushButton::clicked, this, &MainWindow::onLoadTemplate);
     connect(m_btnConnect,   &QPushButton::clicked, this, &MainWindow::onConnectRobot);
     connect(m_btnSendPose,  &QPushButton::clicked, this, &MainWindow::onSendGrabPose);
-    connect(btnMeasure,     &QPushButton::clicked, this, [this]() {
-        int idx = m_measureType->currentIndex();
-        onMeasure(static_cast<MeasureType>(idx));
+    connect(m_btnMeasure, &QPushButton::clicked, this, [this](bool checked) {
+        if (checked) {
+            int idx = m_measureType->currentIndex();
+            onMeasure(static_cast<MeasureType>(idx));
+        } else {
+            cancelMeasurement();
+        }
     });
 
     m_controlDock->setWidget(ctrlWidget);
@@ -306,8 +313,11 @@ void MainWindow::setupStatusBar()
     m_statusFps->setMinimumWidth(80);
     m_statusDetection = new QLabel("检测: --");
     m_statusDetection->setMinimumWidth(300);
+    m_statusMeasure   = new QLabel("测量: 空闲");
+    m_statusMeasure->setMinimumWidth(220);
 
     statusBar()->addPermanentWidget(m_statusDetection);
+    statusBar()->addPermanentWidget(m_statusMeasure);
     statusBar()->addPermanentWidget(m_statusCamera);
     statusBar()->addPermanentWidget(m_statusRobot);
     statusBar()->addPermanentWidget(m_statusLicense);
@@ -332,6 +342,16 @@ void MainWindow::setupConnections()
             this, [this](double){ applyMatchConfig(); });
     connect(m_maxTargets, QOverload<int>::of(&QSpinBox::valueChanged),
             this, [this](int){ applyMatchConfig(); });
+
+    // Combo change → update status bar "已选 <类型>" hint. Suppressed while a
+    // measurement is active (button checked) so the user can't silently switch
+    // type mid-flow without first cancelling.
+    connect(m_measureType, QOverload<int>::of(&QComboBox::currentIndexChanged),
+            this, [this](int idx) {
+        if (m_btnMeasure && m_btnMeasure->isChecked()) return;
+        const QString name = m_measureType->itemText(idx);
+        m_statusMeasure->setText(QString("测量: 已选 %1（按\"执行测量\"开始）").arg(name));
+    });
 
     // ImageView interactions for measurement
     connect(m_imageView, &ImageView::pointPicked, this, &MainWindow::onPointPicked);
@@ -679,7 +699,7 @@ void MainWindow::onLoadTemplate()
 void MainWindow::onMatchResult(const QList<MatchResult> &results)
 {
     m_lastDetections = results;
-    m_imageView->clearOverlays();
+    m_imageView->clearDetectionOverlays();
 
     int validCount = 0;
     const MatchResult *best = nullptr;
@@ -790,18 +810,50 @@ void MainWindow::onCalibrateHandEye()
 
 // ── Measurement ──────────────────────────────────────────────────
 
+void MainWindow::applyMeasurementOverlay(const MeasureResult &r)
+{
+    // Q-A policy: only the most recent measurement is shown.
+    m_imageView->clearMeasurementOverlays();
+    switch (r.type) {
+        case MeasureType::LENGTH:
+        case MeasureType::DISTANCE:
+            m_imageView->addLineMeasurementOverlay(r.pt1, r.pt2, r.label);
+            break;
+        case MeasureType::CIRCLE:
+            m_imageView->addCircleMeasurementOverlay(r.center, r.radius, r.label);
+            break;
+        case MeasureType::AREA:
+            m_imageView->addMeasurementOverlay(r.center.x(), r.center.y(), r.label);
+            break;
+        case MeasureType::ANGLE:
+            // Scheme B: render the user's 4 raw clicked points as two line segments.
+            if (m_collectedPoints.size() >= 4) {
+                m_imageView->addAngleOverlay(
+                    m_collectedPoints[0], m_collectedPoints[1],
+                    m_collectedPoints[2], m_collectedPoints[3],
+                    r.label);
+            }
+            break;
+    }
+}
+
 void MainWindow::onMeasure(MeasureType type)
 {
     if (m_degradedMode) {
         QMessageBox::warning(this, "功能不可用", "License 不可用，测量功能已禁用。");
+        resetMeasurementState();
         return;
     }
     QImage img = m_imageView->currentImage();
-    if (img.isNull()) return;
+    if (img.isNull()) {
+        resetMeasurementState();
+        return;
+    }
 
     m_collectedPoints.clear();
     m_pendingMeasureType = type;
 
+    const QString typeName = m_measureType->currentText();
     switch (type) {
         case MeasureType::LENGTH:
         case MeasureType::CIRCLE:
@@ -809,16 +861,19 @@ void MainWindow::onMeasure(MeasureType type)
             m_imageView->setInteractionMode(InteractionMode::ROI);
             m_pointsNeeded = 0;
             appendLog("请在图像上拖拽选择测量区域...");
+            m_statusMeasure->setText(QString("测量中: %1（请在图像上拖拽 ROI）").arg(typeName));
             break;
         case MeasureType::DISTANCE:
             m_imageView->setInteractionMode(InteractionMode::POINT_PICK);
             m_pointsNeeded = 2;
             appendLog("请在图像上依次点击两个点...");
+            m_statusMeasure->setText(QString("测量中: %1（请点击 2 个点）").arg(typeName));
             break;
         case MeasureType::ANGLE:
             m_imageView->setInteractionMode(InteractionMode::POINT_PICK);
             m_pointsNeeded = 4;
             appendLog("请在图像上依次点击四个点（两条直线）...");
+            m_statusMeasure->setText(QString("测量中: %1（请点击 4 个点）").arg(typeName));
             break;
     }
 }
@@ -826,39 +881,125 @@ void MainWindow::onMeasure(MeasureType type)
 void MainWindow::onPointPicked(const QPointF &p)
 {
     m_collectedPoints.append(p);
-    appendLog(QString("点 %1: (%2, %3)")
-        .arg(m_collectedPoints.size())
+
+    // Visual marker + log: classify by measurement type and index so the user
+    // can see which line / which endpoint each click belongs to (ANGLE uses
+    // color to distinguish line 1 vs line 2).
+    const int idx = m_collectedPoints.size();   // 1-based for the just-appended point
+    QColor   markerColor(0, 200, 255);          // default cyan
+    QString  markerLabel;
+    QString  logLabel;
+    switch (m_pendingMeasureType) {
+        case MeasureType::DISTANCE:
+            markerLabel = QString("点%1").arg(idx);
+            logLabel    = QString("点 %1").arg(idx);
+            break;
+        case MeasureType::ANGLE: {
+            const int lineNo = (idx <= 2) ? 1 : 2;
+            const int ptNo   = ((idx - 1) % 2) + 1;
+            markerColor      = (lineNo == 1) ? QColor(0, 200, 255)
+                                              : QColor(255, 100, 200);
+            markerLabel      = QString("线%1点%2").arg(lineNo).arg(ptNo);
+            logLabel         = QString("线 %1 端点 %2").arg(lineNo).arg(ptNo);
+            break;
+        }
+        default:
+            // LENGTH / CIRCLE / AREA don't enter point-pick mode; defensive fallthrough.
+            markerLabel = QString::number(idx);
+            logLabel    = QString("点 %1").arg(idx);
+            break;
+    }
+    m_imageView->addClickedPointMarker(p, markerColor, markerLabel);
+    appendLog(QString("%1: (%2, %3)")
+        .arg(logLabel)
         .arg(p.x(), 0, 'f', 1).arg(p.y(), 0, 'f', 1));
 
     if (m_collectedPoints.size() >= m_pointsNeeded) {
+        // For ANGLE: reject lines whose two endpoints are within 10 px of each
+        // other. Such a degenerate "line" cannot define a fitting direction —
+        // measureAngle would either throw inside its ROI window or produce a
+        // meaningless angle.
+        if (m_pendingMeasureType == MeasureType::ANGLE) {
+            const QPointF &a = m_collectedPoints[0];
+            const QPointF &b = m_collectedPoints[1];
+            const QPointF &c = m_collectedPoints[2];
+            const QPointF &d = m_collectedPoints[3];
+            const double d1 = std::hypot(b.x() - a.x(), b.y() - a.y());
+            const double d2 = std::hypot(d.x() - c.x(), d.y() - c.y());
+            if (d1 < 10.0 || d2 < 10.0) {
+                QMessageBox::warning(this, "提示",
+                    "每条线的两个端点距离过近（< 10 像素），无法定义有效线段。"
+                    "请重新点选。");
+                m_imageView->clearClickedPointMarkers();
+                m_collectedPoints.clear();
+                m_imageView->setInteractionMode(InteractionMode::ROI);
+                resetMeasurementState();
+                return;
+            }
+        }
+
+        // Clear transient input markers before drawing the final measurement
+        // overlay so the user sees only the result (line segments / cross).
+        m_imageView->clearClickedPointMarkers();
+
         QImage img = m_imageView->currentImage();
         MeasureResult r = m_measureEng->measure(img, m_pendingMeasureType,
                                                  m_collectedPoints, QRectF());
         if (r.valid) {
             appendLog(QString("测量结果: %1 = %2 %3")
                 .arg(r.label).arg(r.value, 0, 'f', 4).arg(r.unit));
-            m_imageView->addMeasurementOverlay(r.pt1.x(), r.pt1.y(), r.label);
-            m_imageView->addMeasurementOverlay(r.pt2.x(), r.pt2.y(), "");
+            applyMeasurementOverlay(r);
         } else {
             appendLog("测量失败: " + r.label);
         }
         m_imageView->setInteractionMode(InteractionMode::ROI);
         m_collectedPoints.clear();
+        resetMeasurementState();
     }
 }
 
 void MainWindow::onRoiSelectedForMeasure(const QRectF &roi)
 {
+    if (roi.isNull() || !roi.isValid() ||
+        roi.width() < 5 || roi.height() < 5) {
+        QMessageBox::warning(this, "提示",
+            "请先在图像上拖拽选择测量区域（最小 5×5 像素）。");
+        resetMeasurementState();
+        return;
+    }
+
     QImage img = m_imageView->currentImage();
-    if (img.isNull()) return;
+    if (img.isNull()) {
+        resetMeasurementState();
+        return;
+    }
 
     MeasureResult r = m_measureEng->measure(img, m_pendingMeasureType, {}, roi);
     if (r.valid) {
         appendLog(QString("测量结果: %1 = %2 %3")
             .arg(r.label).arg(r.value, 0, 'f', 4).arg(r.unit));
-        m_imageView->addMeasurementOverlay(r.pt1.x(), r.pt1.y(), r.label);
+        applyMeasurementOverlay(r);
+    } else {
+        appendLog("测量失败: " + r.label);
+        QMessageBox::warning(this, "测量失败", r.label);
     }
     m_imageView->setInteractionMode(InteractionMode::ROI);
+    resetMeasurementState();
+}
+
+void MainWindow::cancelMeasurement()
+{
+    m_imageView->clearClickedPointMarkers();
+    m_collectedPoints.clear();
+    m_imageView->setInteractionMode(InteractionMode::ROI);
+    appendLog("测量已取消。");
+    resetMeasurementState();
+}
+
+void MainWindow::resetMeasurementState()
+{
+    if (m_btnMeasure) m_btnMeasure->setChecked(false);
+    if (m_statusMeasure) m_statusMeasure->setText("测量: 空闲");
 }
 
 // ── Robot communication ──────────────────────────────────────────

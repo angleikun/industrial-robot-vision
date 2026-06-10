@@ -24,8 +24,23 @@ public:
     // Overlay drawing
     void addDetectionOverlay(double x, double y, double angle, double score, bool valid);
     void addMeasurementOverlay(double x, double y, const QString &label);
+    void addLineMeasurementOverlay(const QPointF &p1, const QPointF &p2, const QString &label);
+    void addCircleMeasurementOverlay(const QPointF &center, double radius, const QString &label);
+    void addAngleOverlay(const QPointF &line1Start, const QPointF &line1End,
+                         const QPointF &line2Start, const QPointF &line2End,
+                         const QString &label);
     void addCalibOverlay(const QList<QPointF> &corners);
-    void clearOverlays();
+
+    // Transient markers for the user's in-progress click input (DISTANCE / ANGLE).
+    // Cleared by MainWindow once the full point set is collected.
+    void addClickedPointMarker(const QPointF &pos, const QColor &color, const QString &label);
+    void clearClickedPointMarkers();
+
+    void clearDetectionOverlays();
+    void clearMeasurementOverlays();
+    void clearCalibrationOverlays();
+    void clearAllOverlays();
+    void clearOverlays();   // compat alias → clearAllOverlays()
 
     // View controls
     void fitToWindow();
@@ -74,9 +89,9 @@ private:
     // Overlay data
     struct DetectionItem {
         QPointF center;
-        double  angle;
-        double  score;
-        bool    valid;
+        double  angle = 0.0;
+        double  score = 0.0;
+        bool    valid = false;
     };
     QList<DetectionItem> m_detections;
 
@@ -86,7 +101,36 @@ private:
     };
     QList<MeasurementItem> m_measurements;
 
+    struct LineMeasurementItem {
+        QPointF p1;
+        QPointF p2;
+        QString label;
+    };
+    QList<LineMeasurementItem> m_lineMeasurements;
+
+    struct CircleMeasurementItem {
+        QPointF center;
+        double  radius = 0.0;
+        QString label;
+    };
+    QList<CircleMeasurementItem> m_circleMeasurements;
+
+    struct AngleMeasurementItem {
+        QPointF l1Start, l1End;
+        QPointF l2Start, l2End;
+        QString label;
+    };
+    QList<AngleMeasurementItem> m_angleMeasurements;
+
     QList<QPointF> m_calibCorners;
+
+    struct ClickedPointMarker {
+        QPointF pos;
+        QColor  color;
+        QString label;
+    };
+    QList<ClickedPointMarker> m_clickedPoints;
+
     bool m_dirtyCache = true;
 };
 
