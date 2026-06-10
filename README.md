@@ -174,6 +174,8 @@ build\Release\RobotVisionSystem.exe
 所有架构决策、bug 诊断、代码 review 由作者主导，AI 用于加速实现和减少 boilerplate 代码。29 个 bug 的修复轨迹均经过人工验证 + 编译验证 + 手动功能测试三重确认。
 
 ## 项目结构
+
+```
 RobotVisionSystem/
 ├── src/                     # C++ 源码 (14 files, 3800 LOC)
 │   ├── MainWindow.cpp       # UI 主窗口 + slot 编排
@@ -191,6 +193,7 @@ RobotVisionSystem/
 ├── DEVLOG.md                # 29 个 bug 完整记录
 ├── BACKLOG_v1_3.md          # v1.3 工程债清单
 └── README.md
+```
 
 ## License
 
